@@ -11,6 +11,7 @@ ALL_RELOCATIONS = defaultdict(dict)
 complaint_log = set()
 path = os.path.dirname(os.path.abspath(__file__))
 
+
 def load_relocations():
     for filename in os.listdir(path):
         if not filename.endswith('.py'):
@@ -18,11 +19,7 @@ def load_relocations():
         if filename == '__init__.py':
             continue
 
-        try:
-            module = importlib.import_module('.%s' % filename[:-3], 'cle.relocations')
-        except ImportError:
-            l.warning("Error importing relocations module %s", filename, exc_info=True)
-            continue
+        module = importlib.import_module('.%s' % filename[:-3], 'cle.backends.relocations')
 
         try:
             arch_name = module.arch
@@ -38,6 +35,7 @@ def load_relocations():
 
             ALL_RELOCATIONS[arch_name][archinfo.defines[item_name]] = item
 
+
 def get_relocation(arch, r_type):
     if r_type == 0:
         return None
@@ -49,19 +47,19 @@ def get_relocation(arch, r_type):
             l.warning("Unknown reloc %d on %s", r_type, arch)
         return None
 
+
 class Relocation(object):
     """
     A representation of a relocation in a binary file. Smart enough to
     relocate itself.
 
-    Properties you may care about:
-    - owner_obj: the binary this relocation was originaly found in, as a cle object
-    - symbol: the Symbol object this relocation refers to
-    - addr: the address in owner_obj this relocation would like to write to
-    - rebased_addr: the address in the global memory space this relocation would like to write to
-    - resolvedby: If the symbol this relocation refers to is an import symbol and that import has been resolved,
-                  this attribute holds the symbol from a different binary that was used to resolve the import.
-    - resolved: Whether the application of this relocation was succesful
+    :ivar owner_obj:    The binary this relocation was originaly found in, as a cle object
+    :ivar symbol:       The Symbol object this relocation refers to
+    :ivar addr:         The address in owner_obj this relocation would like to write to
+    :ivar rebased_addr: The address in the global memory space this relocation would like to write to
+    :ivar resolvedby:   If the symbol this relocation refers to is an import symbol and that import has been resolved,
+                        this attribute holds the symbol from a different binary that was used to resolve the import.
+    :ivar resolved:     Whether the application of this relocation was succesful
     """
     def __init__(self, owner, symbol, addr, addend=None):
         super(Relocation, self).__init__()
@@ -81,18 +79,25 @@ class Relocation(object):
         if self.is_rela:
             return self._addend
         else:
-            return self.owner_obj.memory.read_addr_at(self.addr)
+            return self.owner_obj.memory.read_addr_at(self.addr, orig=True)
 
-    def resolve_symbol(self, solist):
+    def resolve_symbol(self, solist, bypass_compatibility=False):
+        if self.symbol.is_static:
+            # A static symbol should only be resolved by itself.
+            self.resolve(self.symbol)
+            return True
+
         weak_result = None
         for so in solist:
             symbol = so.get_symbol(self.symbol.name)
             if symbol is not None and symbol.is_export:
-                if symbol.binding == 'STB_GLOBAL':
+                if not symbol.is_weak:
                     self.resolve(symbol)
                     return True
                 elif weak_result is None:
                     weak_result = symbol
+            # TODO: Was this check obsolted by the addition of is_static?
+            # I think right now symbol.is_import = !symbol.is_export
             elif symbol is not None and not symbol.is_import and so is self.owner_obj:
                 if not symbol.is_weak:
                     self.resolve(symbol)
@@ -110,6 +115,8 @@ class Relocation(object):
         self.resolvedby = obj
         self.resolved = True
         if self.symbol is not None:
+            if obj is not None:
+                l.debug('%s from %s resolved by %s from %s at %#x', self.symbol.name, self.owner_obj.provides, obj.name, obj.owner_obj.provides, obj.rebased_addr)
             self.symbol.resolve(obj)
 
     @property
@@ -125,16 +132,16 @@ class Relocation(object):
         l.error('Value property of Relocation must be overridden by subclass!')
         return 0
 
-    def relocate(self, solist):
+    def relocate(self, solist, bypass_compatibility=False):
         """
         Applies this relocation. Will make changes to the memory object of the
         object it came from.
 
         This implementation is a generic version that can be overridden in subclasses.
 
-        @param solist       A list of objects from which to resolve symbols
+        :param solist:       A list of objects from which to resolve symbols.
         """
-        if not self.resolve_symbol(solist):
+        if not self.resolve_symbol(solist, bypass_compatibility):
             return False
 
         self.owner_obj.memory.write_addr_at(self.dest_addr, self.value)

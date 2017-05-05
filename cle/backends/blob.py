@@ -1,82 +1,91 @@
-from ..backends import Backend
+from . import Backend, register_backend
 from ..errors import CLEError
-import logging
-import os
 
+import logging
 l = logging.getLogger("cle.blob")
 
 __all__ = ('Blob',)
 
 class Blob(Backend):
     """
-        Representation of a binary blob, i.e. an executable in an unknown file
-        format.
+    Representation of a binary blob, i.e. an executable in an unknown file format.
     """
 
-    def __init__(self, path, custom_arch=None, custom_offset=None, *args, **kwargs):
+    def __init__(self, path, custom_offset=None, segments=None, **kwargs):
         """
-        Arguments we expect in kwargs:
-            @custom_arch: required, an archinfo.Arch for the binary blob
-            @custom_offset: skip this many bytes from the beginning of the file
+        :param custom_arch:   (required) an :class:`archinfo.Arch` for the binary blob.
+        :param custom_offset: Skip this many bytes from the beginning of the file.
+        :param segments:      List of tuples describing how to map data into memory. Tuples
+                              are of ``(file_offset, mem_addr, size)``.
+
+        You can't specify both ``custom_offset`` and ``segments``.
         """
 
+        super(Blob, self).__init__(path, **kwargs)
 
-        if custom_arch is None:
+        if self.arch is None:
             raise CLEError("Must specify custom_arch when loading blob!")
 
-        super(Blob, self).__init__(path, *args,
-                custom_arch=custom_arch,
-                custom_offset=custom_offset, **kwargs)
-
-        self.custom_offset = custom_offset if custom_offset is not None else 0
-
         if self._custom_entry_point is None:
-            l.warning("No custom entry point was specified for blob, assuming 0")
+            l.warning("No custom_entry_point was specified for blob, assuming 0")
             self._custom_entry_point = 0
 
         self._entry = self._custom_entry_point
         self._max_addr = 0
+        self._min_addr = 2**64
+
         self.os = 'unknown'
 
-        self._load(self.custom_offset)
+        if custom_offset is not None:
+            if segments is not None:
+                l.error("You can't specify both custom_offset and segments. Taking only the segments data")
+            else:
+                self.binary_stream.seek(0, 2)
+                segments = [(custom_offset, 0, self.binary_stream.tell() - custom_offset)]
+        else:
+            if segments is not None:
+                pass
+            else:
+                self.binary_stream.seek(0, 2)
+                segments = [(0, 0, self.binary_stream.tell())]
 
-    supported_filetypes = ['elf', 'pe', 'mach-o', 'unknown']
+        for file_offset, mem_addr, size in segments:
+            self._load(file_offset, mem_addr, size)
+
+    @staticmethod
+    def is_compatible(stream):
+        return stream == 0  # I hate pylint
 
     def get_min_addr(self):
-        return 0
+        return self._min_addr
 
     def get_max_addr(self):
         return self._max_addr
 
-    def _load(self, offset, size=None):
-        """ Load a segment into memory """
-        try:
-            f = open(self.binary, 'rb')
-        except IOError:
-            raise IOError("\tFile %s does not exist" % self.binary)
+    def _load(self, file_offset, mem_addr, size):
+        """
+        Load a segment into memory.
+        """
 
-        if size == 0:
-            size = os.path.getsize(self.binary)
-
-        f.seek(offset)
-        if size is None:
-            string = f.read()
-        else:
-            string = f.read(size)
-        self.memory.add_backer(0, string)
-        self._max_addr = len(string)
+        self.binary_stream.seek(file_offset)
+        string = self.binary_stream.read(size)
+        self.memory.add_backer(mem_addr, string)
+        self._max_addr = max(len(string) + mem_addr, self._max_addr)
+        self._min_addr = min(mem_addr, self._min_addr)
 
     def function_name(self, addr): #pylint: disable=unused-argument,no-self-use
-        '''
+        """
         Blobs don't support function names.
-        '''
+        """
         return None
 
     def contains_addr(self, addr):
         return addr in self.memory
 
     def in_which_segment(self, addr): #pylint: disable=unused-argument,no-self-use
-        '''
+        """
         Blobs don't support segments.
-        '''
+        """
         return None
+
+register_backend("blob", Blob)
